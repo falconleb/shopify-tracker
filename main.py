@@ -1,10 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional
 import sqlite3
 import time
-import json
 
 DB_PATH = "events.db"
 
@@ -307,43 +306,6 @@ def analytics_overview():
 @app.get("/analytics/devices/no_purchase")
 def devices_without_purchase():
     """
-    # -------- أجهزة وصلت لمرحلة واتساب (ليدات واتساب) --------
-@app.get("/analytics/devices/whatsapp")
-def whatsapp_devices():
-    """
-    إحصائيات الأجهزة التي كبست على رابط الواتساب:
-    - total_whatsapp_devices: عدد الأجهزة اللي صار منها whatsapp_click
-    - whatsapp_no_purchase_devices: عدد الأجهزة التي كبست واتساب وما عندها شراء مسجّل
-    """
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    # عدد الأجهزة التي كبست واتساب مرة واحدة على الأقل
-    cur.execute("""
-        SELECT COUNT(DISTINCT device_id)
-        FROM events
-        WHERE event = 'whatsapp_click'
-          AND device_id IS NOT NULL
-    """)
-    total_whatsapp_devices = cur.fetchone()[0] or 0
-
-    # عدد الأجهزة التي كبست واتساب وما عليها has_purchased = 1
-    cur.execute("""
-        SELECT COUNT(DISTINCT e.device_id)
-        FROM events e
-        LEFT JOIN visitors v ON v.device_id = e.device_id
-        WHERE e.event = 'whatsapp_click'
-          AND e.device_id IS NOT NULL
-          AND COALESCE(v.has_purchased, 0) = 0
-    """)
-    whatsapp_no_purchase_devices = cur.fetchone()[0] or 0
-
-    conn.close()
-    return {
-        "total_whatsapp_devices": total_whatsapp_devices,
-        "whatsapp_no_purchase_devices": whatsapp_no_purchase_devices,
-    }
-
     يرجّع:
     - عدد الأجهزة الكلي اللي صار منها أحداث
     - عدد الأجهزة اللي اشترت (has_purchased = 1)
@@ -365,6 +327,48 @@ def whatsapp_devices():
         "total_devices": total_devices,
         "purchased_devices": purchased_devices,
         "no_purchase_devices": no_purchase_devices,
+    }
+
+
+# -------- أجهزة وصلت لمرحلة واتساب (ليدات واتساب) --------
+@app.get("/analytics/devices/whatsapp")
+def whatsapp_devices():
+    """
+    إحصائيات الأجهزة التي كبست على رابط الواتساب:
+    - total_whatsapp_devices: عدد الأجهزة اللي صار منها whatsapp_click
+    - whatsapp_no_purchase_devices: عدد الأجهزة التي كبست واتساب وما عندها شراء مسجّل
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # عدد الأجهزة التي كبست واتساب مرة واحدة على الأقل
+    cur.execute(
+        """
+        SELECT COUNT(DISTINCT device_id)
+        FROM events
+        WHERE event = 'whatsapp_click'
+          AND device_id IS NOT NULL
+        """
+    )
+    total_whatsapp_devices = cur.fetchone()[0] or 0
+
+    # عدد الأجهزة التي كبست واتساب وما عليها has_purchased = 1
+    cur.execute(
+        """
+        SELECT COUNT(DISTINCT e.device_id)
+        FROM events e
+        LEFT JOIN visitors v ON v.device_id = e.device_id
+        WHERE e.event = 'whatsapp_click'
+          AND e.device_id IS NOT NULL
+          AND COALESCE(v.has_purchased, 0) = 0
+        """
+    )
+    whatsapp_no_purchase_devices = cur.fetchone()[0] or 0
+
+    conn.close()
+    return {
+        "total_whatsapp_devices": total_whatsapp_devices,
+        "whatsapp_no_purchase_devices": whatsapp_no_purchase_devices,
     }
 
 
