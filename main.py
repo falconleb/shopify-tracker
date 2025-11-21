@@ -123,7 +123,7 @@ def track(event: TrackEvent):
 
     return {"status": "ok"}
 
-# -------- تحليل بسيط --------
+# -------- تحليل بسيط (ملخّص عام) --------
 @app.get("/analytics/overview")
 def analytics_overview():
     conn = sqlite3.connect(DB_PATH)
@@ -151,4 +151,58 @@ def analytics_overview():
         "total_events": total_events,
         "total_sessions": total_sessions,
         "by_source": by_source,
+    }
+
+# -------- تفاصيل جلسة معيّنة (يشمل المنتجات + البلد + المدينة + المصدر) --------
+@app.get("/analytics/session/{session_id}")
+def session_details(session_id: str):
+    """
+    يرجّع كل الأحداث المرتبطة بـ session_id واحد:
+    - نوع الحدث (page_view, product_view, add_to_cart ... لاحقاً)
+    - الرابط
+    - المنتج (id + title لو موجود)
+    - البلد / المدينة
+    - مصدر الزيارة
+    - الترتيب الزمني
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT
+            event,
+            url,
+            product_id,
+            product_title,
+            geo_country,
+            geo_city,
+            traffic_source,
+            ts
+        FROM events
+        WHERE session_id = ?
+        ORDER BY ts ASC
+        """,
+        (session_id,)
+    )
+
+    rows = cur.fetchall()
+    conn.close()
+
+    events = []
+    for r in rows:
+        events.append({
+            "event": r[0],
+            "url": r[1],
+            "product_id": r[2],
+            "product_title": r[3],
+            "country": r[4],
+            "city": r[5],
+            "source": r[6],
+            "timestamp": r[7],
+        })
+
+    return {
+        "session_id": session_id,
+        "events": events
     }
