@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import sqlite3
@@ -7,6 +8,22 @@ import time
 DB_PATH = "events.db"
 
 app = FastAPI(title="Shopify Tracking Server")
+
+# ------- CORS -------
+# الأفضل تحط دومين متجرك الحقيقي هون بدل * لما تستقر الأمور
+origins = [
+    "https://4pytkr-hy.myshopify.com",
+    "https://www.4pytkr-hy.myshopify.com",
+    "https://4pytkr-hy.myshopify.com/",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,      # ممكن مؤقتاً تخليها ["*"] بس للأمان الأفضل نحدد الدومين
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -------- قاعدة البيانات --------
 def init_db():
@@ -43,7 +60,7 @@ def init_db():
 def startup_event():
     init_db()
 
-# -------- نموذج البيانات القادمة من Shopify --------
+# -------- نموذج البيانات --------
 class TrackEvent(BaseModel):
     event: str
     session_id: Optional[str] = None
