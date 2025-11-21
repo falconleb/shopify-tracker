@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 import sqlite3
 import time
 import json
@@ -271,7 +271,7 @@ def track_event(payload: EventIn):
         conn.close()
 
 
-# -------- Endpoint: تقرير عام (مثل اللي عندك) --------
+# -------- Endpoint: تقرير عام --------
 @app.get("/stats/overview")
 def stats_overview():
     conn = get_conn()
@@ -378,4 +378,96 @@ def stats_devices():
         "total_devices": total_devices,
         "purchased_devices": purchased_devices,
         "no_purchase_devices": no_purchase_devices,
+    }
+
+
+# -------- Endpoint: Funnel (Overall + By Source + By Product) --------
+@app.get("/stats/funnel")
+def stats_funnel():
+    """
+    يرجع 3 تقارير فانل:
+    - overall: عدد الجلسات التي وصلت لكل مرحلة
+    - by_source: فانل لكل traffic_source
+    - by_product: فانل لكل product_id (من داخل meta.product_id)
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    FUNNEL_STEPS = [
+        "product_view",
+        "add_to_cart",
+        "cart_view",
+        "begin_checkout",
+        "purchase",
+    ]
+
+    # نجيب كل الأحداث المتعلقة بالفانل
+    placeholders = ",".join(["?"] * len(FUNNEL_STEPS))
+    cur.execute(
+        f"""
+        SELECT event, session_id, traffic_source, meta
+        FROM events
+        WHERE event IN ({placeholders})
+        """,
+        FUNNEL_STEPS,
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    # overall: step → set(session_id)
+    overall_sets = {step: set() for step in FUNNEL_STEPS}
+
+    # by_source: src → step → set(session_id)
+    source_sets = {}
+
+    # by_product: (product_id, title) → step → set(session_id)
+    product_sets = {}
+
+    for event, session_id, traffic_source, meta_json in rows:
+        if not session_id:
+            continue
+
+        # overall
+        overall_sets[event].add(session_id)
+
+        # by_source
+        src = traffic_source or "unknown"
+        if src not in source_sets:
+            source_sets[src] = {step: set() for step in FUNNEL_STEPS}
+        source_sets[src][event].add(session_id)
+
+        # by_product (لو في product_id داخل meta)
+        try:
+            meta = json.loads(meta_json or "{}")
+        except Exception:
+            meta = {}
+
+        product_id = meta.get("product_id")
+        product_title = meta.get("product_title") or meta.get("title")
+
+        if product_id is not None:
+            key = (str(product_id), str(product_title) if product_title else None)
+            if key not in product_sets:
+                product_sets[key] = {step: set() for step in FUNNEL_STEPS}
+            product_sets[key][event].add(session_id)
+
+    # helper لتحويل sets إلى أرقام (counts)
+    def convert_nested(obj):
+        if isinstance(obj, set):
+            return len(obj)
+        if isinstance(obj, dict):
+            return {k: convert_nested(v) for k, v in obj.items()}
+        return obj
+
+    overall = convert_nested(overall_sets)
+    by_source = {src: convert_nested(steps) for src, steps in source_sets.items()}
+    by_product = {
+        f"{pid} | {title if title else 'No Title'}": convert_nested(steps)
+        for (pid, title), steps in product_sets.items()
+    }
+
+    return {
+        "overall": overall,
+        "by_source": by_source,
+        "by_product": by_product,
     }
