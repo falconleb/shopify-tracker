@@ -10,7 +10,6 @@ DB_PATH = "events.db"
 app = FastAPI(title="Shopify Tracking Server")
 
 # ------- CORS -------
-# الأفضل تحط دومين متجرك الحقيقي هون بدل * لما تستقر الأمور
 origins = [
     "https://4pytkr-hy.myshopify.com",
     "https://www.4pytkr-hy.myshopify.com",
@@ -19,7 +18,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,      # ممكن مؤقتاً تخليها ["*"] بس للأمان الأفضل نحدد الدومين
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -153,18 +152,9 @@ def analytics_overview():
         "by_source": by_source,
     }
 
-# -------- تفاصيل جلسة معيّنة (يشمل المنتجات + البلد + المدينة + المصدر) --------
+# -------- تفاصيل جلسة معيّنة --------
 @app.get("/analytics/session/{session_id}")
 def session_details(session_id: str):
-    """
-    يرجّع كل الأحداث المرتبطة بـ session_id واحد:
-    - نوع الحدث (page_view, product_view, add_to_cart ... لاحقاً)
-    - الرابط
-    - المنتج (id + title لو موجود)
-    - البلد / المدينة
-    - مصدر الزيارة
-    - الترتيب الزمني
-    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -205,4 +195,99 @@ def session_details(session_id: str):
     return {
         "session_id": session_id,
         "events": events
+    }
+
+# -------- تحليل الاهتمام (كلاب / قطط / غيره) --------
+@app.get("/analytics/interest/{session_id}")
+def interest(session_id: str):
+    """
+    يحلل المنتجات التي شاهدها الزائر في هذه الجلسة
+    ويحاول يحدد إذا مهتم أكثر بالكلاب أو القطط أو غيره.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT
+            product_id,
+            product_title,
+            url
+        FROM events
+        WHERE session_id = ?
+          AND (event = 'product_view' OR event = 'add_to_cart')
+        """,
+        (session_id,)
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    dog_score = 0
+    cat_score = 0
+    other_score = 0
+
+    products = []
+
+    for pid, title, url in rows:
+        title_lower = (title or "").lower()
+        url_lower = (url or "").lower()
+
+        txt = title_lower + " " + url_lower
+
+        is_dog = any(k in txt for k in [
+            "dog", "dogs", "كلب", "كلاب"
+        ])
+        is_cat = any(k in txt for k in [
+            "cat", "cats", "قط", "قطط"
+        ])
+
+        if is_dog and not is_cat:
+            dog_score += 1
+        elif is_cat and not is_dog:
+            cat_score += 1
+        elif is_cat and is_dog:
+            dog_score += 0.5
+            cat_score += 0.5
+        else:
+            other_score += 1
+
+        products.append({
+            "product_id": pid,
+            "product_title": title,
+            "url": url
+        })
+
+    total = dog_score + cat_score + other_score
+    if total == 0:
+        return {
+            "session_id": session_id,
+            "interest": "unknown",
+            "scores": {
+                "dogs": 0,
+                "cats": 0,
+                "other": 0
+            },
+            "products": products
+        }
+
+    dogs_ratio = dog_score / total
+    cats_ratio = cat_score / total
+    other_ratio = other_score / total
+
+    if dogs_ratio >= cats_ratio and dogs_ratio >= other_ratio:
+        dominant = "dogs"
+    elif cats_ratio >= dogs_ratio and cats_ratio >= other_ratio:
+        dominant = "cats"
+    else:
+        dominant = "other"
+
+    return {
+        "session_id": session_id,
+        "interest": dominant,
+        "scores": {
+            "dogs": round(dogs_ratio, 2),
+            "cats": round(cats_ratio, 2),
+            "other": round(other_ratio, 2)
+        },
+        "products": products
     }
