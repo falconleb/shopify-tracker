@@ -9,7 +9,7 @@ import re
 
 DB_PATH = "events.db"
 
-app = FastAPI(title="Shopify Tracking Server (Captain Version)")
+app = FastAPI(title="Shopify Tracking Server (Captain Version v2)")
 
 # ------- CORS -------
 origins = [
@@ -648,3 +648,158 @@ def stats_funnel():
         "by_source": by_source,
         "by_product": by_product,
     }
+
+
+# -------- Endpoint: ملخص أنواع الأجهزة وأنظمتها --------
+@app.get("/stats/device-types")
+def stats_device_types():
+    """
+    يرجع توزيع الأجهزة حسب:
+    - نوع الجهاز (device_type)
+    - الماركة (device_brand)
+    - النظام (os_name)
+    - المتصفح (browser_name)
+    يعتمد على جدول devices حيث يتم تحديث المعلومات من user_agent.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    def agg(query: str):
+        cur.execute(query)
+        rows = cur.fetchall()
+        return [
+            {
+                "value": r[0] if r[0] not in (None, "") else "unknown",
+                "count": r[1],
+            }
+            for r in rows
+        ]
+
+    by_type = agg(
+        """
+        SELECT device_type, COUNT(DISTINCT device_id)
+        FROM devices
+        GROUP BY device_type
+        """
+    )
+
+    by_brand = agg(
+        """
+        SELECT device_brand, COUNT(DISTINCT device_id)
+        FROM devices
+        GROUP BY device_brand
+        """
+    )
+
+    by_os = agg(
+        """
+        SELECT os_name, COUNT(DISTINCT device_id)
+        FROM devices
+        GROUP BY os_name
+        """
+    )
+
+    by_browser = agg(
+        """
+        SELECT browser_name, COUNT(DISTINCT device_id)
+        FROM devices
+        GROUP BY browser_name
+        """
+    )
+
+    conn.close()
+
+    return {
+        "by_device_type": by_type,
+        "by_brand": by_brand,
+        "by_os": by_os,
+        "by_browser": by_browser,
+    }
+
+
+# -------- Endpoint: إحصائيات Realtime (جلسات/أجهزة نشطة آخر X دقيقة) --------
+@app.get("/stats/realtime")
+def stats_realtime(window_minutes: int = 5):
+    """
+    يعطي نظرة لحظية:
+    - عدد الجلسات النشطة في آخر window_minutes دقيقة
+    - عدد الأجهزة التي شوهدت في آخر window_minutes دقيقة
+    - عدد الأحداث في آخر window_minutes دقيقة
+    """
+    now_ts = int(time.time())
+    threshold = now_ts - window_minutes * 60
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # جلسات نشطة
+    cur.execute(
+        """
+        SELECT COUNT(DISTINCT session_id)
+        FROM sessions
+        WHERE last_seen >= ?
+        """,
+        (threshold,),
+    )
+    active_sessions = cur.fetchone()[0] or 0
+
+    # أجهزة نشطة
+    cur.execute(
+        """
+        SELECT COUNT(DISTINCT device_id)
+        FROM devices
+        WHERE last_seen >= ?
+        """,
+        (threshold,),
+    )
+    active_devices = cur.fetchone()[0] or 0
+
+    # أحداث حديثة
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM events
+        WHERE created_at >= ?
+        """,
+        (threshold,),
+    )
+    recent_events = cur.fetchone()[0] or 0
+
+    conn.close()
+
+    return {
+        "window_minutes": window_minutes,
+        "active_sessions": active_sessions,
+        "active_devices": active_devices,
+        "recent_events": recent_events,
+    }
+
+
+# -------- Endpoint: عدد الأحداث لكل يوم (لآخر 30 يوم) --------
+@app.get("/stats/events-daily")
+def stats_events_daily(limit_days: int = 30):
+    """
+    يرجع عدد الأحداث لكل يوم (للاستخدام في الرسوم البيانية).
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT strftime('%Y-%m-%d', datetime(created_at, 'unixepoch')) AS day,
+               COUNT(*) as cnt
+        FROM events
+        GROUP BY day
+        ORDER BY day DESC
+        LIMIT ?
+        """,
+        (limit_days,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    return [
+        {"day": r[0], "count": r[1]}
+        for r in rows
+        if r[0] is not None
+    ]
