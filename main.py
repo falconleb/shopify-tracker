@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any
 import sqlite3
 import time
 import json
+import re
 
 DB_PATH = "events.db"
 
@@ -35,7 +36,7 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # جدول الأجهزة
+    # جدول الأجهزة (الهيكل الأساسي)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS devices (
@@ -47,6 +48,23 @@ def init_db():
         )
         """
     )
+
+    # إضافة أعمدة معلومات الجهاز لو الداتابيس قديمة
+    extra_device_columns = [
+        "device_type",
+        "device_brand",
+        "device_model",
+        "os_name",
+        "os_version",
+        "browser_name",
+        "browser_version",
+    ]
+    for col in extra_device_columns:
+        try:
+            cur.execute(f"ALTER TABLE devices ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            # العمود موجود من قبل
+            pass
 
     # جدول الجلسات
     cur.execute(
@@ -94,7 +112,7 @@ def init_db():
     conn.close()
 
 
-# استدعاء إنشاء الجداول عند تشغيل السيرفر
+# استدعاء إنشاء / تحديث الجداول عند تشغيل السيرفر
 init_db()
 
 
@@ -117,22 +135,162 @@ class EventIn(BaseModel):
     meta: Optional[Dict[str, Any]] = None  # أي بيانات إضافية (product_id, value...)
 
 
+# -------- تحليل user_agent لاستخراج نوع الجهاز والنظام والمتصفح --------
+def parse_user_agent(ua: Optional[str]) -> Dict[str, Optional[str]]:
+    info = {
+        "device_type": None,
+        "device_brand": None,
+        "device_model": None,
+        "os_name": None,
+        "os_version": None,
+        "browser_name": None,
+        "browser_version": None,
+    }
+    if not ua:
+        return info
+
+    ua_l = ua.lower()
+
+    # نوع الجهاز + الماركة الأساسية
+    if "iphone" in ua_l:
+        info["device_type"] = "Phone"
+        info["device_brand"] = "Apple"
+        info["device_model"] = "iPhone"
+        info["os_name"] = "iOS"
+    elif "ipad" in ua_l:
+        info["device_type"] = "Tablet"
+        info["device_brand"] = "Apple"
+        info["device_model"] = "iPad"
+        info["os_name"] = "iPadOS"
+    elif "android" in ua_l:
+        # موبايل أو تابلت
+        if "mobile" in ua_l:
+            info["device_type"] = "Phone"
+        elif "tablet" in ua_l:
+            info["device_type"] = "Tablet"
+        else:
+            info["device_type"] = "Android Device"
+        info["os_name"] = "Android"
+
+        # محاولة اكتشاف الماركة
+        if "samsung" in ua_l or "sm-" in ua_l:
+            info["device_brand"] = "Samsung"
+        elif "huawei" in ua_l:
+            info["device_brand"] = "Huawei"
+        elif "xiaomi" in ua_l or "redmi" in ua_l or "mi " in ua_l:
+            info["device_brand"] = "Xiaomi"
+        elif "oppo" in ua_l:
+            info["device_brand"] = "Oppo"
+        elif "vivo" in ua_l:
+            info["device_brand"] = "Vivo"
+
+        # محاولة بسيطة لاستخراج موديل (مثلاً SM-A146P)
+        m = re.search(r"(sm-[a-z0-9]+)", ua_l)
+        if m:
+            info["device_model"] = m.group(1).upper()
+    else:
+        # Desktop / Laptop
+        if "windows" in ua_l:
+            info["device_type"] = "Desktop"
+            info["os_name"] = "Windows"
+        elif "macintosh" in ua_l or "mac os" in ua_l:
+            info["device_type"] = "Desktop"
+            info["os_name"] = "macOS"
+            info["device_brand"] = "Apple"
+        elif "linux" in ua_l:
+            info["device_type"] = "Desktop"
+            info["os_name"] = "Linux"
+
+    # استخراج نسخة النظام (بسيطة جداً)
+    if info["os_name"] == "Android":
+        m = re.search(r"android\s+([\d\.]+)", ua_l)
+        if m:
+            info["os_version"] = m.group(1)
+    elif info["os_name"] in ("iOS", "iPadOS"):
+        m = re.search(r"os\s+([\d\_]+)", ua_l)
+        if m:
+            info["os_version"] = m.group(1).replace("_", ".")
+
+    # المتصفح
+    browser_name = None
+    if "edg" in ua_l:
+        browser_name = "Edge"
+    elif "opr" in ua_l or "opera" in ua_l:
+        browser_name = "Opera"
+    elif "chrome" in ua_l and "safari" in ua_l:
+        browser_name = "Chrome"
+    elif "safari" in ua_l and "chrome" not in ua_l:
+        browser_name = "Safari"
+    elif "firefox" in ua_l:
+        browser_name = "Firefox"
+
+    info["browser_name"] = browser_name
+
+    if browser_name:
+        # محاولة جلب النسخة
+        pattern_map = {
+            "Chrome": r"chrome/([\d\.]+)",
+            "Safari": r"version/([\d\.]+)",
+            "Firefox": r"firefox/([\d\.]+)",
+            "Edge": r"edg/([\d\.]+)",
+            "Opera": r"(?:opr|opera)/([\d\.]+)",
+        }
+        pat = pattern_map.get(browser_name)
+        if pat:
+            m = re.search(pat, ua_l)
+            if m:
+                info["browser_version"] = m.group(1)
+
+    return info
+
+
 # -------- منطق التتبع الداخلي --------
-def upsert_device(cur, device_id: str, now_ts: int, traffic_source: Optional[str]):
+def upsert_device(
+    cur,
+    device_id: str,
+    now_ts: int,
+    traffic_source: Optional[str],
+    user_agent: Optional[str],
+):
     # حاول تجيب الجهاز
     cur.execute("SELECT id, is_whatsapp FROM devices WHERE device_id = ?", (device_id,))
     row = cur.fetchone()
 
     is_whatsapp = 1 if (traffic_source == "whatsapp") else 0
+    ua_info = parse_user_agent(user_agent)
 
     if row is None:
         # جهاز جديد
         cur.execute(
             """
-            INSERT INTO devices (device_id, first_seen, last_seen, is_whatsapp)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO devices (
+                device_id,
+                first_seen,
+                last_seen,
+                is_whatsapp,
+                device_type,
+                device_brand,
+                device_model,
+                os_name,
+                os_version,
+                browser_name,
+                browser_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (device_id, now_ts, now_ts, is_whatsapp),
+            (
+                device_id,
+                now_ts,
+                now_ts,
+                is_whatsapp,
+                ua_info["device_type"],
+                ua_info["device_brand"],
+                ua_info["device_model"],
+                ua_info["os_name"],
+                ua_info["os_version"],
+                ua_info["browser_name"],
+                ua_info["browser_version"],
+            ),
         )
     else:
         # تحديث جهاز موجود
@@ -141,10 +299,29 @@ def upsert_device(cur, device_id: str, now_ts: int, traffic_source: Optional[str
         cur.execute(
             """
             UPDATE devices
-            SET last_seen = ?, is_whatsapp = ?
+            SET last_seen = ?,
+                is_whatsapp = ?,
+                device_type = ?,
+                device_brand = ?,
+                device_model = ?,
+                os_name = ?,
+                os_version = ?,
+                browser_name = ?,
+                browser_version = ?
             WHERE device_id = ?
             """,
-            (now_ts, new_is_whatsapp, device_id),
+            (
+                now_ts,
+                new_is_whatsapp,
+                ua_info["device_type"],
+                ua_info["device_brand"],
+                ua_info["device_model"],
+                ua_info["os_name"],
+                ua_info["os_version"],
+                ua_info["browser_name"],
+                ua_info["browser_version"],
+                device_id,
+            ),
         )
 
 
@@ -211,8 +388,14 @@ def track_event(payload: EventIn):
     cur = conn.cursor()
 
     try:
-        # 1) تحديث / إضافة الجهاز
-        upsert_device(cur, payload.device_id, now_ts, payload.traffic_source)
+        # 1) تحديث / إضافة الجهاز (مع user_agent)
+        upsert_device(
+            cur,
+            payload.device_id,
+            now_ts,
+            payload.traffic_source,
+            payload.user_agent,
+        )
 
         # 2) تحديث / إضافة الجلسة
         upsert_session(
@@ -384,12 +567,6 @@ def stats_devices():
 # -------- Endpoint: Funnel (Overall + By Source + By Product) --------
 @app.get("/stats/funnel")
 def stats_funnel():
-    """
-    يرجع 3 تقارير فانل:
-    - overall: عدد الجلسات التي وصلت لكل مرحلة
-    - by_source: فانل لكل traffic_source
-    - by_product: فانل لكل product_id (من داخل meta.product_id)
-    """
     conn = get_conn()
     cur = conn.cursor()
 
