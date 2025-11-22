@@ -9,7 +9,7 @@ import re
 
 DB_PATH = "events.db"
 
-app = FastAPI(title="Shopify Tracking Server (Captain Version v2)")
+app = FastAPI(title="Shopify Tracking Server (Captain Version v2 + Geo)")
 
 # ------- CORS -------
 origins = [
@@ -86,7 +86,7 @@ def init_db():
         """
     )
 
-    # جدول الأحداث
+    # جدول الأحداث (مع أعمدة geo و session stats)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS events (
@@ -103,10 +103,30 @@ def init_db():
             utm_campaign TEXT,
             utm_content TEXT,
             created_at INTEGER,
-            meta TEXT
+            meta TEXT,
+            geo_country TEXT,
+            geo_city TEXT,
+            session_pages INTEGER,
+            session_duration_ms INTEGER,
+            template_name TEXT
         )
         """
     )
+
+    # لو في داتابيس قديمة بدون الأعمدة الإضافية
+    extra_event_columns = [
+        ("geo_country", "TEXT"),
+        ("geo_city", "TEXT"),
+        ("session_pages", "INTEGER"),
+        ("session_duration_ms", "INTEGER"),
+        ("template_name", "TEXT"),
+    ]
+    for col, col_type in extra_event_columns:
+        try:
+            cur.execute(f"ALTER TABLE events ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            # العمود موجود من قبل
+            pass
 
     conn.commit()
     conn.close()
@@ -131,6 +151,14 @@ class EventIn(BaseModel):
     utm_medium: Optional[str] = None
     utm_campaign: Optional[str] = None
     utm_content: Optional[str] = None
+
+    # حقول إضافية من السكربت
+    geo_country: Optional[str] = None
+    geo_city: Optional[str] = None
+    session_pages: Optional[int] = None
+    session_duration_ms: Optional[int] = None
+    template_name: Optional[str] = None
+    timestamp: Optional[int] = None  # لو حابب تستقبله من الفرونت فقط، بدون تخزين
 
     meta: Optional[Dict[str, Any]] = None  # أي بيانات إضافية (product_id, value...)
 
@@ -183,6 +211,14 @@ def parse_user_agent(ua: Optional[str]) -> Dict[str, Optional[str]]:
             info["device_brand"] = "Oppo"
         elif "vivo" in ua_l:
             info["device_brand"] = "Vivo"
+        elif "realme" in ua_l:
+            info["device_brand"] = "Realme"
+        elif "infinix" in ua_l:
+            info["device_brand"] = "Infinix"
+        elif "tecno" in ua_l:
+            info["device_brand"] = "Tecno"
+        elif "motorola" in ua_l or "moto g" in ua_l:
+            info["device_brand"] = "Motorola"
 
         # محاولة بسيطة لاستخراج موديل (مثلاً SM-A146P)
         m = re.search(r"(sm-[a-z0-9]+)", ua_l)
@@ -422,9 +458,12 @@ def track_event(payload: EventIn):
                 url, referrer, user_agent,
                 traffic_source,
                 utm_source, utm_medium, utm_campaign, utm_content,
-                created_at, meta
+                created_at, meta,
+                geo_country, geo_city,
+                session_pages, session_duration_ms,
+                template_name
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.event,
@@ -440,6 +479,11 @@ def track_event(payload: EventIn):
                 payload.utm_content,
                 now_ts,
                 meta_json,
+                payload.geo_country,
+                payload.geo_city,
+                payload.session_pages,
+                payload.session_duration_ms,
+                payload.template_name,
             ),
         )
 
@@ -803,3 +847,44 @@ def stats_events_daily(limit_days: int = 30):
         for r in rows
         if r[0] is not None
     ]
+
+
+# -------- Endpoint: إحصائيات جغرافية بسيطة --------
+@app.get("/stats/geo")
+def stats_geo():
+    """
+    يرجع توزيع الجلسات حسب الدولة والمدينة (حسب ما متوفر).
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT geo_country, COUNT(DISTINCT session_id)
+        FROM events
+        WHERE geo_country IS NOT NULL AND geo_country <> ''
+        GROUP BY geo_country
+        ORDER BY COUNT(DISTINCT session_id) DESC
+        """
+    )
+    by_country = [
+        {"country": row[0], "sessions": row[1]}
+        for row in cur.fetchall()
+    ]
+
+    cur.execute(
+        """
+        SELECT geo_city, COUNT(DISTINCT session_id)
+        FROM events
+        WHERE geo_city IS NOT NULL AND geo_city <> ''
+        GROUP BY geo_city
+        ORDER BY COUNT(DISTINCT session_id) DESC
+        """
+    )
+    by_city = [
+        {"city": row[0], "sessions": row[1]}
+        for row in cur.fetchall()
+    ]
+
+    conn.close()
+    return {"by_country": by_country, "by_city": by_city}
